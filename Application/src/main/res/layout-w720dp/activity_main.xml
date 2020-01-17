@@ -1,0 +1,20 @@
+<LinearLayout
+      xmlns:android="http://schemas.android.com/apk/res/android"
+      android:orientation="horizontal"
+      android:layout_width="match_parent"
+      android:layout_height="match_parent"
+      android:id="@+id/sample_main_layout">
+
+    <View
+          android:layout_width="1dp"
+          android:layout_height="match_parent"
+          android:background="@android:color/darker_gray" />
+
+
+    <fragment
+        android:id="@+id/sample_content_fragment"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+</LinearLayout>
+
+
