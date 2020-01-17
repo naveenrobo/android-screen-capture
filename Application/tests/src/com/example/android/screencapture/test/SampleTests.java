@@ -22,7 +22,6 @@ import android.widget.Button;
 
 import com.example.android.screencapture.MainActivity;
 import com.example.android.screencapture.R;
-import com.example.android.screencapture.ScreenCaptureFragment;
 
 /**
  * Tests for ScreenCapture sample.
