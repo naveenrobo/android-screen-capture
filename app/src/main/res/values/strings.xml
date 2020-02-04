@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">ScreenCapture</string>
+
+      <string name="start">Start</string>
+    <string name="stop">Stop</string>
+    <string name="user_cancelled">User denied screen sharing permission</string>
+
+    <string name="toggleRecordingOn">Recording</string>
+    <string name="toggleRecordingOff">Start Record</string>
+</resources>
