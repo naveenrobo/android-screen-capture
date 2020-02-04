@@ -1,13 +1,11 @@
 package in.co.naveens.screencapture;
 
 
-import android.annotation.TargetApi;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
-import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
@@ -17,22 +15,15 @@ import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.Environment;
-import android.util.DisplayMetrics;
 import android.util.Log;
-import android.view.Display;
-import android.view.LayoutInflater;
 import android.view.Surface;
-import android.view.SurfaceView;
 import android.view.View;
-import android.view.ViewGroup;
 import android.widget.Button;
-import android.widget.Toast;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
 
-import java.io.File;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
@@ -46,27 +37,30 @@ import java.nio.ByteBuffer;
  * on other devices it's visibility is controlled by an item on the Action Bar.
  */
 public class MainActivity extends Activity {
-    private static final String TAG = "ScreenRecordActivity";
+
+    private static final String TAG = MainActivity.class.getSimpleName();
+
+    private Button cast;
+    private TcpSocketClient client;
+    private boolean muxerStarted;
     private MediaProjectionManager mediaProjectionManager;
     private MediaProjection mediaProjection;
-    private MediaMuxer muxer;
+
     private Surface inputSurface;
-    private MediaCodec videoEncoder;
-    private boolean muxerStarted;
-    private int trackIndex = -1;
+    private VirtualDisplay virtualDisplay;
+    private MediaCodec.BufferInfo videoBufferInfo;
+    private MediaCodec encoder;
+    private MediaCodec.Callback encoderCallback;
+    private final String FORMAT = "video/avc";
 
     private static final int REQUEST_CODE_CAPTURE_PERM = 1234;
-    private static final String VIDEO_MIME_TYPE = "video/avc";
 
-    private android.media.MediaCodec.Callback encoderCallback;
-
-    @TargetApi(Build.VERSION_CODES.M)
     @Override
-    protected void onCreate(Bundle savedInstanceState) {
+    protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        setContentView(R.layout.tcp_layout);
 
-        setContentView(R.layout.new_layout);
-
+        /* Check the version. should be greater than M */
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
             new AlertDialog.Builder(this)
                     .setTitle("Error")
@@ -81,170 +75,131 @@ public class MainActivity extends Activity {
             return;
         }
 
+        try {
+            client = new TcpSocketClient(InetAddress.getByName("192.168.1.168"), 49152);
+            client.start();
+            Log.d(TAG, "Socket connected");
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
 
-        Button toggleRecording = findViewById(R.id.screen_record_button);
-        toggleRecording.setText(R.string.toggleRecordingOff);
+        mediaProjectionManager = (MediaProjectionManager) getSystemService(android.content.Context.MEDIA_PROJECTION_SERVICE);
 
-
-        toggleRecording.setOnClickListener(new View.OnClickListener() {
+        cast = findViewById(R.id.cast_screen);
+        cast.setText("Start casting");
+        cast.setOnClickListener(new View.OnClickListener() {
             @RequiresApi(api = Build.VERSION_CODES.M)
             @Override
             public void onClick(View v) {
-                if (v.getId() == R.id.screen_record_button) {
-                    if (muxerStarted) {
-                        stopRecording();
-                        Log.d(TAG, "Stopping screen recording");
-                        ((Button) findViewById(R.id.screen_record_button)).setText(R.string.toggleRecordingOff);
-                    } else {
-                        Log.d(TAG, "Starting screen capture");
-                        ((Button) findViewById(R.id.screen_record_button)).setText(R.string.toggleRecordingOn);
-                        Intent permissionIntent = mediaProjectionManager.createScreenCaptureIntent();
-                        startActivityForResult(permissionIntent, REQUEST_CODE_CAPTURE_PERM);
-                        findViewById(R.id.screen_record_button).setEnabled(false);
-                    }
+                if (muxerStarted) {
+                    Log.d(TAG, "Stopping casting");
+                    stopScreenCapture();
+                    cast.setText("Start casting");
+                } else {
+                    Log.d(TAG, "Starting the cast");
+                    cast.setText("Initializing");
+                    Intent permissionIntent = mediaProjectionManager.createScreenCaptureIntent();
+                    startActivityForResult(permissionIntent, REQUEST_CODE_CAPTURE_PERM);
+                    cast.setEnabled(false);
                 }
             }
-
         });
 
-        mediaProjectionManager = (MediaProjectionManager) getSystemService(
-                android.content.Context.MEDIA_PROJECTION_SERVICE);
 
         encoderCallback = new MediaCodec.Callback() {
             @Override
-            public void onInputBufferAvailable(@NonNull MediaCodec codec, int index) {
-                Log.d(TAG, "Input Buffer Avail");
+            public void onInputBufferAvailable(MediaCodec codec, int inputBufferId) {
             }
 
             @Override
-            public void onOutputBufferAvailable(@NonNull MediaCodec codec, int index, @NonNull MediaCodec.BufferInfo info) {
-                ByteBuffer encodedData = videoEncoder.getOutputBuffer(index);
-                if (encodedData == null) {
-                    throw new RuntimeException("couldn't fetch buffer at index " + index);
+            public void onOutputBufferAvailable(MediaCodec codec, int outputBufferId, MediaCodec.BufferInfo info) {
+                ByteBuffer outputBuffer = codec.getOutputBuffer(outputBufferId);
+                if (info.size > 0 && outputBuffer != null && muxerStarted) {
+                    outputBuffer.position(info.offset);
+                    outputBuffer.limit(info.offset + info.size);
+                    byte[] b = new byte[outputBuffer.remaining()];
+                    outputBuffer.get(b);
+                    sendData(null, b);
                 }
-
-                if ((info.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
-                    info.size = 0;
+                if (encoder != null) {
+                    encoder.releaseOutputBuffer(outputBufferId, false);
                 }
-
-                if (info.size != 0) {
-                    if (muxerStarted) {
-                        encodedData.position(info.offset);
-                        encodedData.limit(info.offset + info.size);
-                        muxer.writeSampleData(trackIndex, encodedData, info);
-                    }
+                if ((videoBufferInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                    Log.i(TAG, "End of Stream");
+                    stopScreenCapture();
                 }
-
-                videoEncoder.releaseOutputBuffer(index, false);
-
             }
 
             @Override
-            public void onError(@NonNull MediaCodec codec, @NonNull MediaCodec.CodecException e) {
-                Log.e(TAG, "MediaCodec " + codec.getName() + " onError:", e);
+            public void onError(MediaCodec codec, MediaCodec.CodecException e) {
+                e.printStackTrace();
             }
 
             @Override
-            public void onOutputFormatChanged(@NonNull MediaCodec codec, @NonNull MediaFormat format) {
-                Log.d(TAG, "Output Format changed");
-                if (trackIndex >= 0) {
-                    throw new RuntimeException("format changed twice");
-                }
-                trackIndex = muxer.addTrack(videoEncoder.getOutputFormat());
-                if (!muxerStarted && trackIndex >= 0) {
-                    muxer.start();
+            public void onOutputFormatChanged(MediaCodec codec, MediaFormat format) {
+                if (!muxerStarted) {
                     muxerStarted = true;
                 }
+                Log.i(TAG, "onOutputFormatChanged. CodecInfo:" + codec.getCodecInfo().toString() + " MediaFormat:" + format.toString());
             }
         };
     }
 
-    @Override
-    protected void onResume() {
-        super.onResume();
-    }
-
     @RequiresApi(api = Build.VERSION_CODES.M)
-    private void startRecording() {
-        DisplayManager dm = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
-        Display defaultDisplay;
-        if (dm != null) {
-            defaultDisplay = dm.getDisplay(Display.DEFAULT_DISPLAY);
-        } else {
-            throw new IllegalStateException("Cannot display manager?!?");
-        }
-        if (defaultDisplay == null) {
-            throw new RuntimeException("No display found.");
-        }
+    private void startCasting(int width, int height) {
+        MediaFormat format = MediaFormat.createVideoFormat(FORMAT, width, height);
+        int frameRate = 60; // 30 fps
+        int dpi = 96;
 
-        // Get the display size and density.
-        DisplayMetrics metrics = getResources().getDisplayMetrics();
-        int screenWidth = metrics.widthPixels;
-        int screenHeight = metrics.heightPixels;
-        int screenDensity = metrics.densityDpi;
-
-        prepareVideoEncoder(screenWidth, screenHeight);
-
-        try {
-            File outputFile = new File(Environment.getExternalStoragePublicDirectory(
-                    Environment.DIRECTORY_PICTURES) + "/screen_recording", "Screen-record-" +
-                    Long.toHexString(System.currentTimeMillis()) + ".mp4");
-            if (!outputFile.getParentFile().exists()) {
-                outputFile.getParentFile().mkdirs();
-            }
-            muxer = new MediaMuxer(outputFile.getCanonicalPath(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
-        } catch (IOException ioe) {
-            throw new RuntimeException("MediaMuxer creation failed", ioe);
-        }
-
-
-        // Start the video input.
-        mediaProjection.createVirtualDisplay("Recording Display", screenWidth,
-                screenHeight, screenDensity, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR/* flags */, inputSurface,
-                null /* callback */, null /* handler */);
-    }
-
-    @RequiresApi(api = Build.VERSION_CODES.M)
-    private void prepareVideoEncoder(int width, int height) {
-        MediaFormat format = MediaFormat.createVideoFormat(VIDEO_MIME_TYPE, width, height);
-        int frameRate = 30; // 30 fps
+        videoBufferInfo = new MediaCodec.BufferInfo();
 
         // Set some required properties. The media codec may fail if these aren't defined.
         format.setInteger(MediaFormat.KEY_COLOR_FORMAT,
                 MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
-        format.setInteger(MediaFormat.KEY_BIT_RATE, 6000000); // 6Mbps
+//        format.setInteger(MediaFormat.KEY_BIT_RATE, 6000000); // 6Mbps
+//        format.setInteger(MediaFormat.KEY_FRAME_RATE, frameRate);
+//        format.setInteger(MediaFormat.KEY_CAPTURE_RATE, frameRate);
+//        format.setInteger(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 1000000 / frameRate);
+//        format.setInteger(MediaFormat.KEY_CHANNEL_COUNT, 1);
+//        format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1); // 1 seconds between I-frames
+
+        format.setInteger(MediaFormat.KEY_BIT_RATE, 1024000);
         format.setInteger(MediaFormat.KEY_FRAME_RATE, frameRate);
-        format.setInteger(MediaFormat.KEY_CAPTURE_RATE, frameRate);
-        format.setInteger(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 1000000 / frameRate);
-        format.setInteger(MediaFormat.KEY_CHANNEL_COUNT, 1);
-        format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1); // 1 seconds between I-frames
+        format.setInteger(MediaFormat.KEY_CHANNEL_COUNT, 0);
+        format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
 
         // Create a MediaCodec encoder and configure it. Get a Surface we can use for recording into.
         try {
-            videoEncoder = MediaCodec.createEncoderByType(VIDEO_MIME_TYPE);
-            videoEncoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
-            inputSurface = videoEncoder.createInputSurface();
-            videoEncoder.setCallback(encoderCallback);
-            videoEncoder.start();
+            encoder = MediaCodec.createEncoderByType(FORMAT);
+            encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+            inputSurface = encoder.createInputSurface();
+            encoder.setCallback(encoderCallback);
+            encoder.start();
+            mediaProjection.createVirtualDisplay("Recording Display", width, height, dpi, 0, this.inputSurface, null, null);
         } catch (IOException e) {
+            Log.e(TAG, "Failed to initial encoder, e: " + e);
             releaseEncoders();
         }
     }
 
-    @RequiresApi(api = Build.VERSION_CODES.LOLLIPOP)
-    private void releaseEncoders() {
-        if (muxer != null) {
-            if (muxerStarted) {
-                muxer.stop();
-            }
-            muxer.release();
-            muxer = null;
-            muxerStarted = false;
+    private void stopScreenCapture() {
+        Log.d(TAG, "Stopping screen casting");
+        releaseEncoders();
+        if (virtualDisplay == null) {
+            return;
         }
-        if (videoEncoder != null) {
-            videoEncoder.stop();
-            videoEncoder.release();
-            videoEncoder = null;
+        virtualDisplay.release();
+        virtualDisplay = null;
+
+    }
+
+    private void releaseEncoders() {
+        Log.d(TAG, "Releasing encoders");
+        muxerStarted = false;
+        if (encoder != null) {
+            encoder.stop();
+            encoder.release();
+            encoder = null;
         }
         if (inputSurface != null) {
             inputSurface.release();
@@ -254,25 +209,20 @@ public class MainActivity extends Activity {
             mediaProjection.stop();
             mediaProjection = null;
         }
-        trackIndex = -1;
+        videoBufferInfo = null;
     }
 
-    @RequiresApi(api = Build.VERSION_CODES.M)
-    private void stopRecording() {
-        releaseEncoders();
-    }
-
-    @RequiresApi(api = Build.VERSION_CODES.M)
-    public void onActivityResult(int requestCode, int resultCode, Intent intent) {
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        Log.d(TAG, "result =" + resultCode);
         if (REQUEST_CODE_CAPTURE_PERM == requestCode) {
-            Button b = findViewById(R.id.screen_record_button);
-            b.setEnabled(true);
+            cast.setEnabled(true);
             if (resultCode == RESULT_OK) {
-                mediaProjection = mediaProjectionManager.getMediaProjection(resultCode, intent);
-                startRecording();
-                b.setText(R.string.toggleRecordingOn);
+                mediaProjection = mediaProjectionManager.getMediaProjection(resultCode, data);
+                startCasting(640, 360);
+                cast.setText("Stop casting");
             } else {
-                // user did not grant permissions
                 new AlertDialog.Builder(this)
                         .setTitle("Error")
                         .setMessage("Permission is required to record the screen.")
@@ -281,5 +231,39 @@ public class MainActivity extends Activity {
             }
         }
     }
+
+    /* Part where TCP IP plays a role */
+    private void sendData(byte[] header, byte[] data) {
+        if (client != null) {
+            if (header != null) {
+                client.send(header);
+            }
+            client.send(data);
+        } else {
+            Log.e(TAG, "Both tcp and udp socket are not available.");
+            stopScreenCapture();
+        }
+    }
+
+    private void closeSocket() {
+        if (client != null) {
+            try {
+                client.close();
+            } catch (Exception ex) {
+                ex.printStackTrace();
+            } finally {
+                client = null;
+            }
+        }
+    }
+
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        Log.d(TAG, "onDestroy");
+        stopScreenCapture();
+        closeSocket();
+    }
+
 }
 
