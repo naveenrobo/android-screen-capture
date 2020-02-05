@@ -75,13 +75,7 @@ public class MainActivity extends Activity {
             return;
         }
 
-        try {
-            client = new TcpSocketClient(InetAddress.getByName("192.168.1.168"), 49152);
-            client.start();
-            Log.d(TAG, "Socket connected");
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
+
 
         mediaProjectionManager = (MediaProjectionManager) getSystemService(android.content.Context.MEDIA_PROJECTION_SERVICE);
 
@@ -97,6 +91,13 @@ public class MainActivity extends Activity {
                     cast.setText("Start casting");
                 } else {
                     Log.d(TAG, "Starting the cast");
+                    try {
+                        client = new TcpSocketClient(InetAddress.getByName("192.168.1.168"), 49152);
+                        client.start();
+                        Log.d(TAG, "Socket connected");
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
                     cast.setText("Initializing");
                     Intent permissionIntent = mediaProjectionManager.createScreenCaptureIntent();
                     startActivityForResult(permissionIntent, REQUEST_CODE_CAPTURE_PERM);
